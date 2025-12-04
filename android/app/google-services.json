@@ -1,0 +1,30 @@
+{
+  "project_info": {
+    "project_number": "988250389008",
+    "firebase_url": "https://classtrack64-default-rtdb.asia-southeast1.firebasedatabase.app",
+    "project_id": "classtrack64",
+    "storage_bucket": "classtrack64.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:988250389008:android:96ee94b5e50049adb9e895",
+        "android_client_info": {
+          "package_name": "com.example.classtrack"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBUdefVxzQT-nlC0rcc2KYwr21HrxVMgY0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
