@@ -19,7 +19,10 @@ class _AddRoutineScreenState extends State<AddRoutineScreen> {
 
   String? _selectedCourseId;
   String _selectedDay = 'Monday';
-  TimeOfDay _selectedTime = const TimeOfDay(hour: 9, minute: 0);
+
+  // We now have Start and End times
+  TimeOfDay _startTime = const TimeOfDay(hour: 9, minute: 0);
+  TimeOfDay _endTime = const TimeOfDay(hour: 10, minute: 0);
 
   bool _isLoading = false;
 
@@ -38,23 +41,69 @@ class _AddRoutineScreenState extends State<AddRoutineScreen> {
     if (widget.routineToEdit != null) {
       _selectedCourseId = widget.routineToEdit!.courseId;
       _selectedDay = widget.routineToEdit!.day;
-      // Parse time string "10:30 AM" back to TimeOfDay if possible
-      // For simplicity in this example, we might reset time or need a parser helper.
-      // We'll leave it as default or user re-picks it to avoid parsing complexity here.
+
+      // Parse existing time string (e.g., "9:00 AM - 10:00 AM")
+      // If it's old format "9:00 AM", we handle that gracefully
+      _parseTimeRange(widget.routineToEdit!.time);
     }
   }
 
-  Future<void> _pickTime() async {
+  void _parseTimeRange(String timeString) {
+    if (timeString.contains(" - ")) {
+      final parts = timeString.split(" - ");
+      if (parts.length == 2) {
+        _startTime = _stringToTimeOfDay(parts[0]);
+        _endTime = _stringToTimeOfDay(parts[1]);
+      }
+    } else {
+      // Old format fallback
+      _startTime = _stringToTimeOfDay(timeString);
+      _endTime = _startTime.replacing(hour: _startTime.hour + 1); // Default 1 hour duration
+    }
+  }
+
+  TimeOfDay _stringToTimeOfDay(String s) {
+    // Simple parser for "h:mm a"
+    try {
+      final format = RegExp(r"(\d+):(\d+)\s?(AM|PM)", caseSensitive: false);
+      final match = format.firstMatch(s);
+      if (match != null) {
+        int hour = int.parse(match.group(1)!);
+        int minute = int.parse(match.group(2)!);
+        String period = match.group(3)!.toUpperCase();
+
+        if (period == 'PM' && hour != 12) hour += 12;
+        if (period == 'AM' && hour == 12) hour = 0;
+
+        return TimeOfDay(hour: hour, minute: minute);
+      }
+    } catch (e) {
+      print("Error parsing time: $e");
+    }
+    return TimeOfDay.now();
+  }
+
+  Future<void> _pickTime(bool isStartTime) async {
     final picked = await showTimePicker(
       context: context,
-      initialTime: _selectedTime,
+      initialTime: isStartTime ? _startTime : _endTime,
     );
     if (picked != null) {
       setState(() {
-        _selectedTime = picked;
+        if (isStartTime) {
+          _startTime = picked;
+          // Auto-adjust end time if it's before start time
+          if (_toDouble(_endTime) <= _toDouble(_startTime)) {
+            _endTime = _startTime.replacing(hour: _startTime.hour + 1);
+          }
+        } else {
+          _endTime = picked;
+        }
       });
     }
   }
+
+  double _toDouble(TimeOfDay myTime) => myTime.hour + myTime.minute / 60.0;
 
   Future<void> _saveForm() async {
     if (!_formKey.currentState!.validate()) return;
@@ -65,8 +114,8 @@ class _AddRoutineScreenState extends State<AddRoutineScreen> {
 
     setState(() => _isLoading = true);
 
-    // Format time to string (e.g., "10:30 AM")
-    final timeString = _selectedTime.format(context);
+    // Format time range string: "10:30 AM - 11:45 AM"
+    final timeString = "${_startTime.format(context)} - ${_endTime.format(context)}";
 
     try {
       final provider = Provider.of<RoutineProvider>(context, listen: false);
@@ -143,23 +192,41 @@ class _AddRoutineScreenState extends State<AddRoutineScreen> {
 
                   const SizedBox(height: 15),
 
-                  // 3. Time Picker
-                  InkWell(
-                    onTap: _pickTime,
-                    child: InputDecorator(
-                      decoration: const InputDecoration(
-                        labelText: 'Select Time',
-                        border: OutlineInputBorder(),
-                        prefixIcon: Icon(Icons.access_time),
+                  // 3. Time Picker Row (Start & End)
+                  const Text("Class Duration", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: InkWell(
+                          onTap: () => _pickTime(true),
+                          child: InputDecorator(
+                            decoration: const InputDecoration(
+                              labelText: 'Start Time',
+                              border: OutlineInputBorder(),
+                              prefixIcon: Icon(Icons.access_time),
+                            ),
+                            child: Text(_startTime.format(context)),
+                          ),
+                        ),
                       ),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                        children: [
-                          Text(_selectedTime.format(context), style: const TextStyle(fontSize: 16)),
-                          const Icon(Icons.arrow_drop_down),
-                        ],
+                      const SizedBox(width: 10),
+                      const Icon(Icons.arrow_forward, color: Colors.grey),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: InkWell(
+                          onTap: () => _pickTime(false),
+                          child: InputDecorator(
+                            decoration: const InputDecoration(
+                              labelText: 'End Time',
+                              border: OutlineInputBorder(),
+                              prefixIcon: Icon(Icons.access_time_filled),
+                            ),
+                            child: Text(_endTime.format(context)),
+                          ),
+                        ),
                       ),
-                    ),
+                    ],
                   ),
 
                   const SizedBox(height: 30),
