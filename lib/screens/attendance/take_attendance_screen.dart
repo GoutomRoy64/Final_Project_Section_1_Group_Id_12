@@ -22,7 +22,13 @@ class TakeAttendanceScreen extends StatefulWidget {
 class _TakeAttendanceScreenState extends State<TakeAttendanceScreen> {
   DateTime _selectedDate = DateTime.now();
   Map<String, String> _attendanceStatus = {};
+  Map<String, Map<String, dynamic>> _summaryData = {}; // Stores historical stats
   bool _isLoading = false;
+
+  // 0: First Save (Save Attendance)
+  // 1: Second Save (Save Late Attendance)
+  // 2: Disabled (Saved)
+  int _saveState = 0;
 
   @override
   void initState() {
@@ -33,13 +39,22 @@ class _TakeAttendanceScreenState extends State<TakeAttendanceScreen> {
   Future<void> _loadData() async {
     setState(() => _isLoading = true);
 
+    final attProvider = Provider.of<AttendanceProvider>(context, listen: false);
+    final stuProvider = Provider.of<StudentProvider>(context, listen: false);
+
     // 1. Fetch Students
-    await Provider.of<StudentProvider>(context, listen: false).fetchStudents(widget.courseId);
+    await stuProvider.fetchStudents(widget.courseId);
 
     // 2. Fetch existing attendance for this date
     await _fetchAttendanceForDate();
 
-    setState(() => _isLoading = false);
+    // 3. Fetch Historical Summary (To calculate Absents)
+    final summary = await attProvider.getAttendanceSummary(widget.courseId);
+
+    setState(() {
+      _summaryData = summary;
+      _isLoading = false;
+    });
   }
 
   Future<void> _fetchAttendanceForDate() async {
@@ -65,6 +80,13 @@ class _TakeAttendanceScreenState extends State<TakeAttendanceScreen> {
 
     setState(() {
       _attendanceStatus = newStatus;
+      // If record exists in DB, we treat it as "Saved Once" (State 1)
+      // Otherwise it's "New" (State 0)
+      if (record != null) {
+        _saveState = 1;
+      } else {
+        _saveState = 0;
+      }
     });
   }
 
@@ -77,7 +99,8 @@ class _TakeAttendanceScreenState extends State<TakeAttendanceScreen> {
     );
     if (picked != null) {
       setState(() => _selectedDate = picked);
-      await _fetchAttendanceForDate(); // Reload data for new date
+      // Reload everything including summary when date changes (optional, but good for consistency)
+      await _loadData();
     }
   }
 
@@ -87,6 +110,19 @@ class _TakeAttendanceScreenState extends State<TakeAttendanceScreen> {
       final dateKey = DateFormat('yyyy-MM-dd').format(_selectedDate);
       await Provider.of<AttendanceProvider>(context, listen: false)
           .markAttendance(widget.courseId, dateKey, _attendanceStatus);
+
+      // Update Button State logic
+      if (_saveState < 2) {
+        setState(() {
+          _saveState++;
+        });
+      }
+
+      // Reload summary to reflect new changes immediately
+      final summary = await Provider.of<AttendanceProvider>(context, listen: false).getAttendanceSummary(widget.courseId);
+      setState(() {
+        _summaryData = summary;
+      });
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -102,10 +138,30 @@ class _TakeAttendanceScreenState extends State<TakeAttendanceScreen> {
     }
   }
 
+  // Helper to change status: Present <-> Absent
+  void _toggleStatus(String studentId) {
+    setState(() {
+      String current = _attendanceStatus[studentId] ?? "Present";
+      if (current == "Present") {
+        _attendanceStatus[studentId] = "Absent";
+      } else {
+        _attendanceStatus[studentId] = "Present";
+      }
+    });
+  }
+
   @override
   Widget build(BuildContext context) {
     final students = Provider.of<StudentProvider>(context).students;
     final formattedDate = DateFormat('EEE, MMM d, yyyy').format(_selectedDate);
+
+    // Determine Button Text
+    String buttonText = "SAVE ATTENDANCE";
+    if (_saveState == 1) buttonText = "SAVE LATE ATTENDANCE";
+    if (_saveState >= 2) buttonText = "ATTENDANCE SUBMITTED";
+
+    // Determine if Button is disabled
+    bool isButtonDisabled = _isLoading || _saveState >= 2;
 
     return Scaffold(
       appBar: AppBar(
@@ -156,21 +212,63 @@ class _TakeAttendanceScreenState extends State<TakeAttendanceScreen> {
                 final status = _attendanceStatus[student.id] ?? "Present";
                 final isPresent = status == "Present";
 
+                // Calculate Absents from Summary Data
+                int totalClasses = 0;
+                int presentClasses = 0;
+
+                if (_summaryData.containsKey(student.id)) {
+                  totalClasses = _summaryData[student.id]?['total'] ?? 0;
+                  presentClasses = _summaryData[student.id]?['present'] ?? 0;
+                }
+                int absents = totalClasses - presentClasses;
+
                 return Card(
                   margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                  child: ListTile(
-                    title: Text(student.name, style: const TextStyle(fontWeight: FontWeight.bold)),
-                    subtitle: Text(student.rollNumber),
-                    trailing: Switch(
-                      value: isPresent,
-                      activeColor: Colors.green,
-                      inactiveThumbColor: Colors.red,
-                      inactiveTrackColor: Colors.red.shade100,
-                      onChanged: (val) {
-                        setState(() {
-                          _attendanceStatus[student.id] = val ? "Present" : "Absent";
-                        });
-                      },
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 8.0),
+                    child: ListTile(
+                      title: Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              student.name,
+                              style: const TextStyle(fontWeight: FontWeight.bold),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          // Absent Count Indicator
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                            decoration: BoxDecoration(
+                                color: Colors.red.withOpacity(0.1),
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(color: Colors.red.withOpacity(0.3))
+                            ),
+                            child: Text(
+                              "Abs: $absents",
+                              style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.red[700]
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      subtitle: Text(student.rollNumber),
+                      trailing: InkWell(
+                        onTap: isButtonDisabled ? null : () => _toggleStatus(student.id),
+                        child: Padding(
+                          padding: const EdgeInsets.all(8.0),
+                          child: Icon(
+                            isPresent ? Icons.check_circle : Icons.circle_outlined,
+                            color: isButtonDisabled
+                                ? Colors.grey
+                                : (isPresent ? Colors.green : Colors.grey),
+                            size: 32,
+                          ),
+                        ),
+                      ),
                     ),
                   ),
                 );
@@ -185,14 +283,16 @@ class _TakeAttendanceScreenState extends State<TakeAttendanceScreen> {
               width: double.infinity,
               height: 50,
               child: ElevatedButton(
-                onPressed: _isLoading ? null : _saveAttendance,
+                onPressed: isButtonDisabled ? null : _saveAttendance,
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.indigo,
                   foregroundColor: Colors.white,
+                  disabledBackgroundColor: Colors.grey,
+                  disabledForegroundColor: Colors.white70,
                 ),
                 child: _isLoading
                     ? const CircularProgressIndicator(color: Colors.white)
-                    : const Text("SAVE ATTENDANCE", style: TextStyle(fontSize: 18)),
+                    : Text(buttonText, style: const TextStyle(fontSize: 18)),
               ),
             ),
           ),
