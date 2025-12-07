@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:firebase_database/firebase_database.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import '../models/routine_model.dart';
 
 class RoutineProvider with ChangeNotifier {
@@ -9,90 +10,71 @@ class RoutineProvider with ChangeNotifier {
   List<Routine> get routines => _routines;
   bool get isLoading => _isLoading;
 
-  final DatabaseReference _dbRef = FirebaseDatabase.instance.ref().child('routine');
+  final CollectionReference _routineRef = FirebaseFirestore.instance.collection('routines');
 
-  // 1. Fetch All Routines
+  String? get _userId => FirebaseAuth.instance.currentUser?.uid;
+
   Future<void> fetchRoutines() async {
+    if (_userId == null) return;
+
     _isLoading = true;
     notifyListeners();
-
     try {
-      final snapshot = await _dbRef.get();
-      final List<Routine> loadedRoutines = [];
+      // FILTER: Only fetch routines created by current user
+      final snapshot = await _routineRef.where('userId', isEqualTo: _userId).get();
 
-      if (snapshot.exists) {
-        Map<dynamic, dynamic> data = snapshot.value as Map<dynamic, dynamic>;
-        data.forEach((key, value) {
-          loadedRoutines.add(Routine.fromMap(key, value));
-        });
-      }
-
-      _routines = loadedRoutines;
+      _routines = snapshot.docs.map((doc) {
+        return Routine.fromMap(doc.id, doc.data() as Map<String, dynamic>);
+      }).toList();
     } catch (error) {
-      print("Error fetching routines: $error");
+      print("Error: $error");
     }
-
     _isLoading = false;
     notifyListeners();
   }
 
-  // 2. Add a new Routine
   Future<void> addRoutine(String courseId, String day, String time) async {
+    if (_userId == null) return;
+
     try {
-      final newRoutineRef = _dbRef.push();
-      final newRoutine = Routine(
-        id: newRoutineRef.key!,
-        courseId: courseId,
-        day: day,
-        time: time,
-      );
+      final newDoc = _routineRef.doc();
+      final newRoutine = Routine(id: newDoc.id, courseId: courseId, day: day, time: time);
 
-      await newRoutineRef.set(newRoutine.toMap());
+      // SAVE with userId
+      Map<String, dynamic> data = newRoutine.toMap();
+      data['userId'] = _userId;
 
+      await newDoc.set(data);
       _routines.add(newRoutine);
       notifyListeners();
     } catch (error) {
-      print("Error adding routine: $error");
       rethrow;
     }
   }
 
-  // 3. Update an existing Routine (This was the missing method)
   Future<void> updateRoutine(String id, String courseId, String day, String time) async {
     try {
+      final updatedRoutine = Routine(id: id, courseId: courseId, day: day, time: time);
+      await _routineRef.doc(id).update(updatedRoutine.toMap());
+
       final index = _routines.indexWhere((r) => r.id == id);
-      if (index >= 0) {
-        final updatedRoutine = Routine(
-          id: id,
-          courseId: courseId,
-          day: day,
-          time: time,
-        );
-
-        await _dbRef.child(id).update(updatedRoutine.toMap());
-
-        _routines[index] = updatedRoutine;
-        notifyListeners();
-      }
+      if (index >= 0) _routines[index] = updatedRoutine;
+      notifyListeners();
     } catch (error) {
-      print("Error updating routine: $error");
       rethrow;
     }
   }
 
-  // 4. Delete a Routine
   Future<void> deleteRoutine(String routineId) async {
     try {
-      await _dbRef.child(routineId).remove();
+      await _routineRef.doc(routineId).delete();
       _routines.removeWhere((r) => r.id == routineId);
       notifyListeners();
     } catch (error) {
-      print("Error deleting routine: $error");
       rethrow;
     }
   }
 
-  // Helper: Get routines for a specific day
   List<Routine> getRoutinesByDay(String day) {
     return _routines.where((routine) => routine.day.toLowerCase() == day.toLowerCase()).toList();
   }
