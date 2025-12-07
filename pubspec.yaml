@@ -37,7 +37,10 @@ dependencies:
 
   # Firebase (Core + Realtime Database)
   firebase_core: ^3.0.0
-  firebase_database: ^11.0.0
+
+
+  firebase_auth: ^5.0.0       # NEW
+  cloud_firestore: ^5.0.0
 
   # Date formatting (Helpful for Routine and Attendance dates)
   intl: ^0.19.0

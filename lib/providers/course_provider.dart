@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:firebase_database/firebase_database.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart'; // Import Auth
 import '../models/course_model.dart';
 
 class CourseProvider with ChangeNotifier {
@@ -9,81 +10,73 @@ class CourseProvider with ChangeNotifier {
   List<Course> get courses => _courses;
   bool get isLoading => _isLoading;
 
-  // Reference to the main 'courses' node in Firebase
-  final DatabaseReference _dbRef = FirebaseDatabase.instance.ref().child('courses');
+  final CollectionReference _coursesRef = FirebaseFirestore.instance.collection('courses');
 
-  // 1. Fetch all courses from Firebase
+  // Helper to get current User ID
+  String? get _userId => FirebaseAuth.instance.currentUser?.uid;
+
   Future<void> fetchCourses() async {
+    if (_userId == null) return; // Guard: No user logged in
+
     _isLoading = true;
     notifyListeners();
-
     try {
-      final snapshot = await _dbRef.get();
-      final List<Course> loadedCourses = [];
+      // FILTER: Only get courses created by THIS user
+      final snapshot = await _coursesRef.where('userId', isEqualTo: _userId).get();
 
-      if (snapshot.exists) {
-        // Convert Firebase Map to List of Course objects
-        Map<dynamic, dynamic> data = snapshot.value as Map<dynamic, dynamic>;
-        data.forEach((key, value) {
-          loadedCourses.add(Course.fromMap(key, value));
-        });
-      }
-
-      _courses = loadedCourses;
+      _courses = snapshot.docs.map((doc) {
+        return Course.fromMap(doc.id, doc.data() as Map<String, dynamic>);
+      }).toList();
     } catch (error) {
-      print("Error fetching courses: $error");
-      // Handle error appropriately in production
+      print("Error: $error");
     }
-
     _isLoading = false;
     notifyListeners();
   }
 
-  // 2. Add a new course
   Future<void> addCourse(String name, String code) async {
+    if (_userId == null) return;
+
     try {
-      // push() creates a unique ID (key) automatically
-      final newCourseRef = _dbRef.push();
-      final newCourse = Course(id: newCourseRef.key!, name: name, code: code);
+      final newDoc = _coursesRef.doc();
+      final newCourse = Course(id: newDoc.id, name: name, code: code);
 
-      await newCourseRef.set(newCourse.toMap());
+      // SAVE: Add userId to the document
+      Map<String, dynamic> data = newCourse.toMap();
+      data['userId'] = _userId;
 
-      // Update local list immediately (Optimistic update)
+      await newDoc.set(data);
       _courses.add(newCourse);
       notifyListeners();
     } catch (error) {
-      print("Error adding course: $error");
       rethrow;
     }
   }
 
-  // 3. Update an existing course
   Future<void> updateCourse(String id, String newName, String newCode) async {
     try {
-      final courseIndex = _courses.indexWhere((c) => c.id == id);
-      if (courseIndex >= 0) {
-        final updatedCourse = Course(id: id, name: newName, code: newCode);
+      final updatedCourse = Course(id: id, name: newName, code: newCode);
 
-        // Update specific path in Firebase
-        await _dbRef.child(id).update(updatedCourse.toMap());
+      // Ensure we preserve the userId (or specific fields)
+      await _coursesRef.doc(id).update({
+        'name': newName,
+        'code': newCode,
+      });
 
-        _courses[courseIndex] = updatedCourse;
-        notifyListeners();
-      }
+      final index = _courses.indexWhere((c) => c.id == id);
+      if (index >= 0) _courses[index] = updatedCourse;
+      notifyListeners();
     } catch (error) {
-      print("Error updating course: $error");
       rethrow;
     }
   }
 
-  // 4. Delete a course
   Future<void> deleteCourse(String id) async {
     try {
-      await _dbRef.child(id).remove();
+      await _coursesRef.doc(id).delete();
       _courses.removeWhere((c) => c.id == id);
       notifyListeners();
     } catch (error) {
-      print("Error deleting course: $error");
       rethrow;
     }
   }

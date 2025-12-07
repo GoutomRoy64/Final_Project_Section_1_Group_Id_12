@@ -1,12 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
+import 'package:firebase_auth/firebase_auth.dart'; // Import Firebase Auth
 import '../providers/routine_provider.dart';
-import '../providers/course_provider.dart'; // Import CourseProvider
+import '../providers/course_provider.dart';
 import '../models/routine_model.dart';
 import '../models/course_model.dart';
 
-// Import Screens
 import 'courses/course_list_screen.dart';
 import 'students/select_course_screen.dart';
 import 'routine/routine_list_screen.dart';
@@ -23,12 +23,56 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
-    // 1. Fetch BOTH Routines and Courses when app starts
-    // We need courses to look up the names for the routines
     Future.delayed(Duration.zero, () {
       Provider.of<RoutineProvider>(context, listen: false).fetchRoutines();
       Provider.of<CourseProvider>(context, listen: false).fetchCourses();
     });
+  }
+
+  // 0: Past, 1: Running, 2: Upcoming
+  int _getClassStatus(String timeRange) {
+    try {
+      final now = DateTime.now();
+      DateTime start, end;
+
+      // Handle "Start - End" format
+      if (timeRange.contains(" - ")) {
+        final parts = timeRange.split(" - ");
+        start = _parseDateTime(parts[0], now);
+        end = _parseDateTime(parts[1], now);
+      } else {
+        // Handle old single time format (Assume 1 hour duration)
+        start = _parseDateTime(timeRange, now);
+        end = start.add(const Duration(hours: 1));
+      }
+
+      // Handle overnight classes (e.g., 11 PM to 1 AM)
+      if (end.isBefore(start)) {
+        end = end.add(const Duration(days: 1));
+      }
+
+      if (now.isAfter(end)) return 0; // Past
+      if (now.isAfter(start) && now.isBefore(end)) return 1; // Running
+      return 2; // Upcoming
+
+    } catch (e) {
+      return 2; // Default to upcoming if parsing fails
+    }
+  }
+
+  DateTime _parseDateTime(String timeStr, DateTime now) {
+    String cleanStr = timeStr.replaceAll(RegExp(r'[\u202F\u00A0]'), ' ').trim();
+    try {
+      final time = DateFormat("h:mm a").parse(cleanStr);
+      return DateTime(now.year, now.month, now.day, time.hour, time.minute);
+    } catch (_) {
+      try {
+        final time = DateFormat.jm().parse(cleanStr);
+        return DateTime(now.year, now.month, now.day, time.hour, time.minute);
+      } catch (e) {
+        return now.add(const Duration(days: 1));
+      }
+    }
   }
 
   @override
@@ -41,6 +85,17 @@ class _HomeScreenState extends State<HomeScreen> {
         title: const Text('ClassTrack Dashboard', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white)),
         backgroundColor: Colors.indigo,
         elevation: 0,
+        actions: [
+          // LOGOUT BUTTON
+          IconButton(
+            icon: const Icon(Icons.logout, color: Colors.white),
+            tooltip: 'Logout',
+            onPressed: () async {
+              await FirebaseAuth.instance.signOut();
+              // No navigation needed; StreamBuilder in main.dart handles it
+            },
+          ),
+        ],
       ),
       body: Column(
         children: [
@@ -77,7 +132,6 @@ class _HomeScreenState extends State<HomeScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // Section 1: Today's Classes
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
@@ -88,7 +142,6 @@ class _HomeScreenState extends State<HomeScreen> {
                       IconButton(
                         icon: const Icon(Icons.refresh),
                         onPressed: () {
-                          // Manual Refresh Button
                           Provider.of<RoutineProvider>(context, listen: false).fetchRoutines();
                           Provider.of<CourseProvider>(context, listen: false).fetchCourses();
                         },
@@ -99,12 +152,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
                   Expanded(
                     flex: 4,
-                    // Use Consumer2 to listen to BOTH RoutineProvider and CourseProvider
                     child: Consumer2<RoutineProvider, CourseProvider>(
                       builder: (context, routineProvider, courseProvider, child) {
 
-                        // Show loading only if routines are loading.
-                        // (Course loading usually happens fast in background)
                         if (routineProvider.isLoading) {
                           return const Center(child: CircularProgressIndicator());
                         }
@@ -112,70 +162,95 @@ class _HomeScreenState extends State<HomeScreen> {
                         List<Routine> todaysRoutines = routineProvider.getRoutinesByDay(todayName);
 
                         if (todaysRoutines.isEmpty) {
-                          return Container(
-                            width: double.infinity,
-                            decoration: BoxDecoration(
-                              color: Colors.white,
-                              borderRadius: BorderRadius.circular(15),
-                              border: Border.all(color: Colors.grey.shade200),
-                            ),
-                            child: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                Icon(Icons.event_busy, size: 50, color: Colors.grey[400]),
-                                const SizedBox(height: 10),
-                                Text("No classes scheduled for $todayName", style: TextStyle(color: Colors.grey[600])),
-                              ],
-                            ),
-                          );
+                          return _buildEmptyState(todayName);
                         }
+
+                        // Sort routines by time
+                        todaysRoutines.sort((a, b) {
+                          return a.time.compareTo(b.time);
+                        });
 
                         return ListView.builder(
                           itemCount: todaysRoutines.length,
                           itemBuilder: (context, index) {
                             final routine = todaysRoutines[index];
-
-                            // LOOKUP LOGIC: Find the course object that matches the ID in the routine
                             final course = courseProvider.courses.firstWhere(
                                   (c) => c.id == routine.courseId,
-                              orElse: () => Course(id: '', name: 'Loading...', code: ''),
+                              orElse: () => Course(id: '', name: 'Loading...', code: '...'),
                             );
 
+                            final status = _getClassStatus(routine.time);
+
+                            Color cardColor;
+                            Color textColor;
+                            Color iconColor;
+                            IconData statusIcon;
+                            String statusText;
+
+                            if (status == 0) { // Past
+                              cardColor = Colors.grey.shade200;
+                              textColor = Colors.grey.shade600;
+                              iconColor = Colors.grey;
+                              statusIcon = Icons.check_circle_outline;
+                              statusText = "Completed";
+                            } else if (status == 1) { // Running
+                              cardColor = Colors.green.shade50;
+                              textColor = Colors.green.shade900;
+                              iconColor = Colors.green;
+                              statusIcon = Icons.play_circle_fill;
+                              statusText = "Ongoing Now";
+                            } else { // Upcoming
+                              cardColor = Colors.white;
+                              textColor = Colors.black87;
+                              iconColor = Colors.indigo;
+                              statusIcon = Icons.schedule;
+                              statusText = "Upcoming";
+                            }
+
                             return Card(
-                              elevation: 2,
+                              color: cardColor,
+                              elevation: status == 1 ? 4 : 1,
                               margin: const EdgeInsets.only(bottom: 10),
-                              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                                side: status == 1 ? const BorderSide(color: Colors.green, width: 1.5) : BorderSide.none,
+                              ),
                               child: ListTile(
                                 leading: Container(
                                   padding: const EdgeInsets.all(10),
                                   decoration: BoxDecoration(
-                                    color: Colors.indigo.withOpacity(0.1),
+                                    color: iconColor.withOpacity(0.1),
                                     borderRadius: BorderRadius.circular(10),
                                   ),
-                                  child: const Icon(Icons.class_outlined, color: Colors.indigo),
+                                  child: Icon(Icons.class_outlined, color: iconColor),
                                 ),
-                                // 1. Title is now the COURSE NAME
                                 title: Text(
                                   course.name,
-                                  style: const TextStyle(fontWeight: FontWeight.bold),
+                                  style: TextStyle(fontWeight: FontWeight.bold, color: textColor),
                                   overflow: TextOverflow.ellipsis,
                                 ),
-                                // 2. Subtitle shows Time and Code
-                                subtitle: Row(
+                                subtitle: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
-                                    Icon(Icons.access_time, size: 14, color: Colors.grey[600]),
-                                    const SizedBox(width: 4),
-                                    Text(routine.time, style: const TextStyle(fontWeight: FontWeight.w500)),
-                                    const SizedBox(width: 10),
-                                    if (course.code.isNotEmpty)
-                                      Container(
-                                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                        decoration: BoxDecoration(
-                                            color: Colors.grey[200],
-                                            borderRadius: BorderRadius.circular(4)
-                                        ),
-                                        child: Text(course.code, style: const TextStyle(fontSize: 12)),
-                                      )
+                                    const SizedBox(height: 4),
+                                    Row(
+                                      children: [
+                                        Icon(Icons.access_time, size: 14, color: textColor.withOpacity(0.7)),
+                                        const SizedBox(width: 4),
+                                        Text(routine.time, style: TextStyle(fontWeight: FontWeight.w500, color: textColor.withOpacity(0.8), fontSize: 13)),
+                                      ],
+                                    ),
+                                    const SizedBox(height: 4),
+                                    Row(
+                                      children: [
+                                        Icon(statusIcon, size: 12, color: iconColor),
+                                        const SizedBox(width: 4),
+                                        Text(statusText, style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold, color: iconColor)),
+                                        const SizedBox(width: 8),
+                                        if(course.code.isNotEmpty)
+                                          Text("•  ${course.code}", style: TextStyle(fontSize: 11, color: textColor.withOpacity(0.7))),
+                                      ],
+                                    )
                                   ],
                                 ),
                               ),
@@ -188,7 +263,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
                   const SizedBox(height: 20),
 
-                  // Section 2: Quick Actions Grid
                   const Text(
                     "Management",
                     style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.black87),
@@ -202,42 +276,10 @@ class _HomeScreenState extends State<HomeScreen> {
                       mainAxisSpacing: 15,
                       childAspectRatio: 1.3,
                       children: [
-                        _buildDashboardCard(
-                          context,
-                          icon: Icons.library_books,
-                          label: "Courses",
-                          color: Colors.blueAccent,
-                          onTap: () {
-                            Navigator.push(context, MaterialPageRoute(builder: (_) => const CourseListScreen()));
-                          },
-                        ),
-                        _buildDashboardCard(
-                          context,
-                          icon: Icons.people,
-                          label: "Students",
-                          color: Colors.green,
-                          onTap: () {
-                            Navigator.push(context, MaterialPageRoute(builder: (_) => const SelectCourseScreen()));
-                          },
-                        ),
-                        _buildDashboardCard(
-                          context,
-                          icon: Icons.checklist,
-                          label: "Attendance",
-                          color: Colors.orange,
-                          onTap: () {
-                            Navigator.push(context, MaterialPageRoute(builder: (_) => const SelectCourseAttendanceScreen()));
-                          },
-                        ),
-                        _buildDashboardCard(
-                          context,
-                          icon: Icons.calendar_month,
-                          label: "Routine",
-                          color: Colors.purple,
-                          onTap: () {
-                            Navigator.push(context, MaterialPageRoute(builder: (_) => const RoutineListScreen()));
-                          },
-                        ),
+                        _buildDashboardCard(context, icon: Icons.library_books, label: "Courses", color: Colors.blueAccent, onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const CourseListScreen()))),
+                        _buildDashboardCard(context, icon: Icons.people, label: "Students", color: Colors.green, onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const SelectCourseScreen()))),
+                        _buildDashboardCard(context, icon: Icons.checklist, label: "Attendance", color: Colors.orange, onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const SelectCourseAttendanceScreen()))),
+                        _buildDashboardCard(context, icon: Icons.calendar_month, label: "Routine", color: Colors.purple, onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const RoutineListScreen()))),
                       ],
                     ),
                   ),
@@ -245,6 +287,25 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
           ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildEmptyState(String todayName) {
+    return Container(
+      width: double.infinity,
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(15),
+        border: Border.all(color: Colors.grey.shade200),
+      ),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.event_busy, size: 50, color: Colors.grey[400]),
+          const SizedBox(height: 10),
+          Text("No classes scheduled for $todayName", style: TextStyle(color: Colors.grey[600])),
         ],
       ),
     );
