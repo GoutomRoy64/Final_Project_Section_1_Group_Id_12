@@ -1,65 +1,62 @@
 import 'package:flutter/material.dart';
-import 'package:firebase_database/firebase_database.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import '../models/attendance_model.dart';
 
 class AttendanceProvider with ChangeNotifier {
-  // Stores the attendance record for the specific date we are currently viewing
   AttendanceRecord? _currentDateRecord;
   bool _isLoading = false;
 
   AttendanceRecord? get currentDateRecord => _currentDateRecord;
   bool get isLoading => _isLoading;
 
-  final DatabaseReference _dbRef = FirebaseDatabase.instance.ref().child('attendance');
+  final CollectionReference _attRef = FirebaseFirestore.instance.collection('attendance');
+  String? get _userId => FirebaseAuth.instance.currentUser?.uid;
 
-  // 1. Save or Update Attendance for a specific Date
+  String _getDocId(String courseId, String date) => "${courseId}_$date";
+
   Future<void> markAttendance(String courseId, String date, Map<String, String> statusMap) async {
+    if (_userId == null) return;
     try {
-      // Path: /attendance/courseId/date/
-      // We explicitly wrap it in 'status' to match the model structure
-      await _dbRef.child(courseId).child(date).set({
+      final docId = _getDocId(courseId, date);
+
+      await _attRef.doc(docId).set({
+        'courseId': courseId,
+        'date': date,
         'status': statusMap,
+        'userId': _userId, // TAGGING RECORD
       });
 
-      // Update local state if we are currently viewing this date
       _currentDateRecord = AttendanceRecord(date: date, studentStatus: statusMap);
       notifyListeners();
     } catch (error) {
-      print("Error marking attendance: $error");
       rethrow;
     }
   }
 
-  // 2. Fetch Attendance for a specific Date
   Future<void> fetchAttendance(String courseId, String date) async {
     _isLoading = true;
-    _currentDateRecord = null; // Reset while loading
+    _currentDateRecord = null;
     notifyListeners();
 
     try {
-      final snapshot = await _dbRef.child(courseId).child(date).get();
+      final docId = _getDocId(courseId, date);
+      final doc = await _attRef.doc(docId).get();
 
-      if (snapshot.exists) {
-        Map<dynamic, dynamic> data = snapshot.value as Map<dynamic, dynamic>;
-
-        // We wrap the data in a map structure that our Model expects
-        // The model expects { 'status': ... } but snapshot.value IS that map if we queried the date node
-        // Actually, based on the save structure above, snapshot.value will be { 'status': {...} }
+      if (doc.exists) {
+        Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
         _currentDateRecord = AttendanceRecord.fromMap(date, data);
       } else {
-        // If no data exists for this date, we create an empty record
         _currentDateRecord = AttendanceRecord(date: date, studentStatus: {});
       }
     } catch (error) {
-      print("Error fetching attendance: $error");
+      print("Error: $error");
     }
 
     _isLoading = false;
     notifyListeners();
   }
 
-  // 3. Calculate Attendance Summary (Total Classes, Present Count, Percentage)
-  // Returns a Map: { studentId: { 'present': 5, 'total': 10, 'percent': 50.0 } }
   Future<Map<String, Map<String, dynamic>>> getAttendanceSummary(String courseId) async {
     _isLoading = true;
     notifyListeners();
@@ -67,43 +64,34 @@ class AttendanceProvider with ChangeNotifier {
     Map<String, Map<String, dynamic>> summary = {};
 
     try {
-      // Fetch ALL dates for this course
-      final snapshot = await _dbRef.child(courseId).get();
+      final snapshot = await _attRef.where('courseId', isEqualTo: courseId).get();
 
-      if (snapshot.exists) {
-        Map<dynamic, dynamic> allDates = snapshot.value as Map<dynamic, dynamic>;
+      for (var doc in snapshot.docs) {
+        Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
+        if (data['status'] != null) {
+          Map<String, dynamic> statusMap = data['status'];
 
-        // Iterate through every date (e.g., "2023-10-01", "2023-10-02")
-        allDates.forEach((dateKey, dateValue) {
-          if (dateValue['status'] != null) {
-            Map<dynamic, dynamic> statusMap = dateValue['status'];
+          statusMap.forEach((studentId, status) {
+            if (!summary.containsKey(studentId)) {
+              summary[studentId] = {'present': 0, 'total': 0, 'percent': 0.0};
+            }
+            summary[studentId]!['total'] += 1;
+            if (status == 'Present') {
+              summary[studentId]!['present'] += 1;
+            }
+          });
+        }
+      }
 
-            // Iterate through every student in that date
-            statusMap.forEach((studentId, status) {
-              // Initialize if not exists
-              if (!summary.containsKey(studentId)) {
-                summary[studentId] = {'present': 0, 'total': 0, 'percent': 0.0};
-              }
-
-              // Increment total classes for this student
-              summary[studentId]!['total'] += 1;
-
-              // Increment present count
-              if (status == 'Present') {
-                summary[studentId]!['present'] += 1;
-              }
-            });
-          }
-        });
-
-        // Final Calculation of Percentage
-        summary.forEach((studentId, data) {
+      summary.forEach((studentId, data) {
+        if (data['total'] > 0) {
           double percent = (data['present'] / data['total']) * 100;
           summary[studentId]!['percent'] = double.parse(percent.toStringAsFixed(1));
-        });
-      }
+        }
+      });
+
     } catch (error) {
-      print("Error calculating summary: $error");
+      print("Error: $error");
     }
 
     _isLoading = false;

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
+import 'package:firebase_auth/firebase_auth.dart'; // Import Firebase Auth
 import '../providers/routine_provider.dart';
 import '../providers/course_provider.dart';
 import '../models/routine_model.dart';
@@ -46,7 +47,6 @@ class _HomeScreenState extends State<HomeScreen> {
       }
 
       // Handle overnight classes (e.g., 11 PM to 1 AM)
-      // If end time appears to be before start time, assume it ends the next day
       if (end.isBefore(start)) {
         end = end.add(const Duration(days: 1));
       }
@@ -56,28 +56,20 @@ class _HomeScreenState extends State<HomeScreen> {
       return 2; // Upcoming
 
     } catch (e) {
-      // print("Parsing Error: $e"); // Debugging
       return 2; // Default to upcoming if parsing fails
     }
   }
 
   DateTime _parseDateTime(String timeStr, DateTime now) {
-    // 1. Sanitize the string to remove Non-Breaking Spaces (\u202F)
-    // which Flutter adds by default, but DateFormat fails to parse.
     String cleanStr = timeStr.replaceAll(RegExp(r'[\u202F\u00A0]'), ' ').trim();
-
-    // 2. Try parsing with standard format
     try {
-      // Explicitly try "h:mm a" (e.g., "9:30 AM")
       final time = DateFormat("h:mm a").parse(cleanStr);
       return DateTime(now.year, now.month, now.day, time.hour, time.minute);
     } catch (_) {
       try {
-        // Fallback to default locale parsing
         final time = DateFormat.jm().parse(cleanStr);
         return DateTime(now.year, now.month, now.day, time.hour, time.minute);
       } catch (e) {
-        // Last resort: Return current time to avoid crash, but logs will show upcoming
         return now.add(const Duration(days: 1));
       }
     }
@@ -93,6 +85,17 @@ class _HomeScreenState extends State<HomeScreen> {
         title: const Text('ClassTrack Dashboard', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white)),
         backgroundColor: Colors.indigo,
         elevation: 0,
+        actions: [
+          // LOGOUT BUTTON
+          IconButton(
+            icon: const Icon(Icons.logout, color: Colors.white),
+            tooltip: 'Logout',
+            onPressed: () async {
+              await FirebaseAuth.instance.signOut();
+              // No navigation needed; StreamBuilder in main.dart handles it
+            },
+          ),
+        ],
       ),
       body: Column(
         children: [
@@ -164,8 +167,6 @@ class _HomeScreenState extends State<HomeScreen> {
 
                         // Sort routines by time
                         todaysRoutines.sort((a, b) {
-                          // Simple string sort isn't perfect for time, but works roughly for AM/PM if format is consistent
-                          // Better to parse, but this is quick fix for list order
                           return a.time.compareTo(b.time);
                         });
 
@@ -178,7 +179,6 @@ class _HomeScreenState extends State<HomeScreen> {
                               orElse: () => Course(id: '', name: 'Loading...', code: '...'),
                             );
 
-                            // Determine Status & Styling
                             final status = _getClassStatus(routine.time);
 
                             Color cardColor;
@@ -209,7 +209,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
                             return Card(
                               color: cardColor,
-                              elevation: status == 1 ? 4 : 1, // Elevate running class
+                              elevation: status == 1 ? 4 : 1,
                               margin: const EdgeInsets.only(bottom: 10),
                               shape: RoundedRectangleBorder(
                                 borderRadius: BorderRadius.circular(12),
