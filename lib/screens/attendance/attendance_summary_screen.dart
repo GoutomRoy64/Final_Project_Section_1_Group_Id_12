@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
-import 'package:cloud_firestore/cloud_firestore.dart'; // UPDATED
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart';
 import '../../providers/student_provider.dart';
 import '../../models/student_model.dart';
@@ -32,12 +32,8 @@ class _AttendanceSummaryScreenState extends State<AttendanceSummaryScreen> {
 
   Future<void> _generateReport() async {
     final stuProvider = Provider.of<StudentProvider>(context, listen: false);
-
-    // 1. Fetch Students
     await stuProvider.fetchStudents(widget.courseId);
 
-    // 2. Fetch Attendance (Firestore)
-    // We query the collection 'attendance' where 'courseId' matches
     final snapshot = await FirebaseFirestore.instance
         .collection('attendance')
         .where('courseId', isEqualTo: widget.courseId)
@@ -86,13 +82,16 @@ class _AttendanceSummaryScreenState extends State<AttendanceSummaryScreen> {
     }
   }
 
-  int _calculateAbsents(String studentId) {
-    if (!_attendanceMatrix.containsKey(studentId)) return 0;
-    int count = 0;
+  // Calculate Stats: [Absents, Lates]
+  List<int> _calculateStats(String studentId) {
+    if (!_attendanceMatrix.containsKey(studentId)) return [0, 0];
+    int absent = 0;
+    int late = 0;
     _attendanceMatrix[studentId]!.forEach((key, value) {
-      if (value == 'Absent') count++;
+      if (value == 'Absent') absent++;
+      if (value == 'Late') late++;
     });
-    return count;
+    return [absent, late];
   }
 
   @override
@@ -122,6 +121,7 @@ class _AttendanceSummaryScreenState extends State<AttendanceSummaryScreen> {
             columns: [
               const DataColumn(label: Text('Student Name', style: TextStyle(fontWeight: FontWeight.bold))),
               const DataColumn(label: Text('Abs', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.red))),
+              const DataColumn(label: Text('Late', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.orange))), // New Column
               ..._classDates.asMap().entries.map((entry) {
                 int index = entry.key + 1;
                 return DataColumn(
@@ -131,7 +131,10 @@ class _AttendanceSummaryScreenState extends State<AttendanceSummaryScreen> {
               }).toList(),
             ],
             rows: students.map((student) {
-              int absentCount = _calculateAbsents(student.id);
+              List<int> stats = _calculateStats(student.id);
+              int absents = stats[0];
+              int lates = stats[1];
+
               return DataRow(
                 cells: [
                   DataCell(
@@ -140,10 +143,12 @@ class _AttendanceSummaryScreenState extends State<AttendanceSummaryScreen> {
                         child: Text(student.name, style: const TextStyle(fontWeight: FontWeight.w500), overflow: TextOverflow.ellipsis),
                       )
                   ),
-                  DataCell(Text(absentCount.toString(), style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.red))),
+                  DataCell(Text(absents.toString(), style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.red))),
+                  DataCell(Text(lates.toString(), style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.deepOrange))),
                   ..._classDates.map((date) {
                     String status = _attendanceMatrix[student.id]?[date] ?? '-';
                     String displayDate = _formatDate(date);
+
                     Color cellColor = Colors.black;
                     if (status == 'Present') cellColor = Colors.green;
                     if (status == 'Absent') cellColor = Colors.red;
@@ -156,6 +161,7 @@ class _AttendanceSummaryScreenState extends State<AttendanceSummaryScreen> {
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
                           Text(displayDate, style: TextStyle(color: cellColor, fontSize: 12, fontWeight: FontWeight.bold)),
+                          Text(status[0], style: TextStyle(fontSize: 10, color: cellColor)), // Shows P, A, L
                         ],
                       ),
                     );
