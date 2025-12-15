@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
-import 'package:firebase_auth/firebase_auth.dart'; // Import Firebase Auth
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import '../providers/routine_provider.dart';
 import '../providers/course_provider.dart';
 import '../models/routine_model.dart';
@@ -20,33 +21,53 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
+  String _teacherName = "Teacher";
+
   @override
   void initState() {
     super.initState();
+    _loadData();
+  }
+
+  Future<void> _loadData() async {
     Future.delayed(Duration.zero, () {
       Provider.of<RoutineProvider>(context, listen: false).fetchRoutines();
       Provider.of<CourseProvider>(context, listen: false).fetchCourses();
     });
+
+    _fetchTeacherName();
   }
 
-  // 0: Past, 1: Running, 2: Upcoming
+  Future<void> _fetchTeacherName() async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user != null) {
+        final doc = await FirebaseFirestore.instance.collection('users').doc(user.uid).get();
+        if (doc.exists && doc.data() != null) {
+          setState(() {
+            _teacherName = doc.data()!['name'] ?? "Teacher";
+          });
+        }
+      }
+    } catch (e) {
+      print("Error fetching name: $e");
+    }
+  }
+
   int _getClassStatus(String timeRange) {
     try {
       final now = DateTime.now();
       DateTime start, end;
 
-      // Handle "Start - End" format
       if (timeRange.contains(" - ")) {
         final parts = timeRange.split(" - ");
         start = _parseDateTime(parts[0], now);
         end = _parseDateTime(parts[1], now);
       } else {
-        // Handle old single time format (Assume 1 hour duration)
         start = _parseDateTime(timeRange, now);
         end = start.add(const Duration(hours: 1));
       }
 
-      // Handle overnight classes (e.g., 11 PM to 1 AM)
       if (end.isBefore(start)) {
         end = end.add(const Duration(days: 1));
       }
@@ -56,12 +77,12 @@ class _HomeScreenState extends State<HomeScreen> {
       return 2; // Upcoming
 
     } catch (e) {
-      return 2; // Default to upcoming if parsing fails
+      return 2;
     }
   }
 
   DateTime _parseDateTime(String timeStr, DateTime now) {
-    String cleanStr = timeStr.replaceAll(RegExp(r'[\u202F\u00A0]'), ' ').trim();
+    String cleanStr = timeStr.replaceAll(RegExp('[  ]'), ' ').trim();
     try {
       final time = DateFormat("h:mm a").parse(cleanStr);
       return DateTime(now.year, now.month, now.day, time.hour, time.minute);
@@ -81,141 +102,136 @@ class _HomeScreenState extends State<HomeScreen> {
     String formattedDate = DateFormat('MMM d, y').format(DateTime.now());
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('ClassTrack Dashboard', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.white)),
-        backgroundColor: Colors.indigo,
-        elevation: 0,
-        actions: [
-          // LOGOUT BUTTON
-          IconButton(
-            icon: const Icon(Icons.logout, color: Colors.white),
-            tooltip: 'Logout',
-            onPressed: () async {
-              await FirebaseAuth.instance.signOut();
-              // No navigation needed; StreamBuilder in main.dart handles it
-            },
-          ),
-        ],
-      ),
+      backgroundColor: Colors.grey[100],
       body: Column(
         children: [
-          // Header Section
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(20),
-            decoration: const BoxDecoration(
-              color: Colors.indigo,
-              borderRadius: BorderRadius.only(
-                bottomLeft: Radius.circular(30),
-                bottomRight: Radius.circular(30),
-              ),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  "Welcome, Teacher!",
-                  style: TextStyle(color: Colors.white70, fontSize: 16),
-                ),
-                const SizedBox(height: 5),
-                Text(
-                  formattedDate,
-                  style: const TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.bold),
-                ),
-              ],
-            ),
-          ),
-
+          // 1. Scrollable Top Section (App Bar + Today's Classes)
           Expanded(
-            child: Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(
-                        "Today's Classes ($todayName)",
-                        style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.black87),
+            child: CustomScrollView(
+              slivers: [
+                SliverAppBar(
+                  pinned: true,
+                  expandedHeight: 180.0,
+                  backgroundColor: Colors.indigo,
+                  flexibleSpace: FlexibleSpaceBar(
+                    background: Container(
+                      padding: const EdgeInsets.only(left: 20, right: 20, bottom: 20, top: 60),
+                      decoration: const BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                          colors: [Colors.indigo, Colors.blueAccent],
+                        ),
                       ),
-                      IconButton(
-                        icon: const Icon(Icons.refresh),
-                        onPressed: () {
-                          Provider.of<RoutineProvider>(context, listen: false).fetchRoutines();
-                          Provider.of<CourseProvider>(context, listen: false).fetchCourses();
-                        },
-                      )
-                    ],
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisAlignment: MainAxisAlignment.end,
+                        children: [
+                          Text(
+                            "Welcome, $_teacherName!",
+                            style: const TextStyle(color: Colors.white70, fontSize: 16),
+                          ),
+                          const SizedBox(height: 5),
+                          Text(
+                            formattedDate,
+                            style: const TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.bold),
+                          ),
+                        ],
+                      ),
+                    ),
                   ),
-                  const SizedBox(height: 10),
+                  actions: [
+                    IconButton(
+                      icon: const Icon(Icons.logout, color: Colors.white),
+                      tooltip: 'Logout',
+                      onPressed: () async {
+                        await FirebaseAuth.instance.signOut();
+                      },
+                    ),
+                  ],
+                ),
 
-                  Expanded(
-                    flex: 4,
-                    child: Consumer2<RoutineProvider, CourseProvider>(
-                      builder: (context, routineProvider, courseProvider, child) {
+                SliverToBoxAdapter(
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 20, 16, 10),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          "Today's Classes ($todayName)",
+                          style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.black87),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.refresh, color: Colors.indigo),
+                          onPressed: _loadData,
+                        )
+                      ],
+                    ),
+                  ),
+                ),
 
-                        if (routineProvider.isLoading) {
-                          return const Center(child: CircularProgressIndicator());
-                        }
+                Consumer2<RoutineProvider, CourseProvider>(
+                  builder: (context, routineProvider, courseProvider, child) {
+                    if (routineProvider.isLoading) {
+                      return const SliverToBoxAdapter(child: Center(child: Padding(padding: EdgeInsets.all(20), child: CircularProgressIndicator())));
+                    }
 
-                        List<Routine> todaysRoutines = routineProvider.getRoutinesByDay(todayName);
+                    List<Routine> todaysRoutines = routineProvider.getRoutinesByDay(todayName);
 
-                        if (todaysRoutines.isEmpty) {
-                          return _buildEmptyState(todayName);
-                        }
+                    if (todaysRoutines.isEmpty) {
+                      return SliverToBoxAdapter(child: _buildEmptyState(todayName));
+                    }
 
-                        // Sort routines by time
-                        todaysRoutines.sort((a, b) {
-                          return a.time.compareTo(b.time);
-                        });
+                    todaysRoutines.sort((a, b) => a.time.compareTo(b.time));
 
-                        return ListView.builder(
-                          itemCount: todaysRoutines.length,
-                          itemBuilder: (context, index) {
-                            final routine = todaysRoutines[index];
-                            final course = courseProvider.courses.firstWhere(
-                                  (c) => c.id == routine.courseId,
-                              orElse: () => Course(id: '', name: 'Loading...', code: '...'),
-                            );
+                    return SliverList(
+                      delegate: SliverChildBuilderDelegate(
+                            (context, index) {
+                          final routine = todaysRoutines[index];
+                          final course = courseProvider.courses.firstWhere(
+                                (c) => c.id == routine.courseId,
+                            orElse: () => Course(id: '', name: 'Course not found', code: '...'),
+                          );
 
-                            final status = _getClassStatus(routine.time);
+                          final status = _getClassStatus(routine.time);
 
-                            Color cardColor;
-                            Color textColor;
-                            Color iconColor;
-                            IconData statusIcon;
-                            String statusText;
+                          Color cardColor;
+                          Color textColor;
+                          Color iconColor;
+                          IconData statusIcon;
+                          String statusText;
 
-                            if (status == 0) { // Past
-                              cardColor = Colors.grey.shade200;
-                              textColor = Colors.grey.shade600;
-                              iconColor = Colors.grey;
-                              statusIcon = Icons.check_circle_outline;
-                              statusText = "Completed";
-                            } else if (status == 1) { // Running
-                              cardColor = Colors.green.shade50;
-                              textColor = Colors.green.shade900;
-                              iconColor = Colors.green;
-                              statusIcon = Icons.play_circle_fill;
-                              statusText = "Ongoing Now";
-                            } else { // Upcoming
-                              cardColor = Colors.white;
-                              textColor = Colors.black87;
-                              iconColor = Colors.indigo;
-                              statusIcon = Icons.schedule;
-                              statusText = "Upcoming";
-                            }
+                          if (status == 0) { // Past
+                            cardColor = Colors.grey.shade200;
+                            textColor = Colors.grey.shade600;
+                            iconColor = Colors.grey;
+                            statusIcon = Icons.check_circle_outline;
+                            statusText = "Completed";
+                          } else if (status == 1) { // Running
+                            cardColor = Colors.green.shade50;
+                            textColor = Colors.green.shade900;
+                            iconColor = Colors.green;
+                            statusIcon = Icons.play_circle_fill;
+                            statusText = "Ongoing Now";
+                          } else { // Upcoming
+                            cardColor = Colors.white;
+                            textColor = Colors.black87;
+                            iconColor = Colors.indigo;
+                            statusIcon = Icons.schedule;
+                            statusText = "Upcoming";
+                          }
 
-                            return Card(
+                          return Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 5.0),
+                            child: Card(
                               color: cardColor,
                               elevation: status == 1 ? 4 : 1,
-                              margin: const EdgeInsets.only(bottom: 10),
                               shape: RoundedRectangleBorder(
                                 borderRadius: BorderRadius.circular(12),
                                 side: status == 1 ? const BorderSide(color: Colors.green, width: 1.5) : BorderSide.none,
                               ),
                               child: ListTile(
+                                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                                 leading: Container(
                                   padding: const EdgeInsets.all(10),
                                   decoration: BoxDecoration(
@@ -232,7 +248,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                 subtitle: Column(
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
-                                    const SizedBox(height: 4),
+                                    const SizedBox(height: 6),
                                     Row(
                                       children: [
                                         Icon(Icons.access_time, size: 14, color: textColor.withOpacity(0.7)),
@@ -240,7 +256,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                         Text(routine.time, style: TextStyle(fontWeight: FontWeight.w500, color: textColor.withOpacity(0.8), fontSize: 13)),
                                       ],
                                     ),
-                                    const SizedBox(height: 4),
+                                    const SizedBox(height: 6),
                                     Row(
                                       children: [
                                         Icon(statusIcon, size: 12, color: iconColor),
@@ -254,37 +270,62 @@ class _HomeScreenState extends State<HomeScreen> {
                                   ],
                                 ),
                               ),
-                            );
-                          },
-                        );
-                      },
-                    ),
-                  ),
+                            ),
+                          );
+                        },
+                        childCount: todaysRoutines.length,
+                      ),
+                    );
+                  },
+                ),
 
-                  const SizedBox(height: 20),
+                // Add some padding at the bottom of the list so items aren't hidden behind the fixed panel if expanded
+                const SliverToBoxAdapter(child: SizedBox(height: 20)),
+              ],
+            ),
+          ),
 
-                  const Text(
-                    "Management",
-                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.black87),
-                  ),
-                  const SizedBox(height: 10),
-                  Expanded(
-                    flex: 5,
-                    child: GridView.count(
-                      crossAxisCount: 2,
-                      crossAxisSpacing: 15,
-                      mainAxisSpacing: 15,
-                      childAspectRatio: 1.3,
-                      children: [
-                        _buildDashboardCard(context, icon: Icons.library_books, label: "Courses", color: Colors.blueAccent, onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const CourseListScreen()))),
-                        _buildDashboardCard(context, icon: Icons.people, label: "Students", color: Colors.green, onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const SelectCourseScreen()))),
-                        _buildDashboardCard(context, icon: Icons.checklist, label: "Attendance", color: Colors.orange, onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const SelectCourseAttendanceScreen()))),
-                        _buildDashboardCard(context, icon: Icons.calendar_month, label: "Routine", color: Colors.purple, onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const RoutineListScreen()))),
-                      ],
-                    ),
-                  ),
-                ],
+          // 2. Fixed Management Section (Anchored at Bottom)
+          Container(
+            padding: const EdgeInsets.fromLTRB(20, 20, 20, 20),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: const BorderRadius.only(
+                  topLeft: Radius.circular(30),
+                  topRight: Radius.circular(30)
               ),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.05),
+                  blurRadius: 15,
+                  offset: const Offset(0, -5),
+                ),
+              ],
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min, // Takes minimal height needed
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  "Management",
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: Colors.black87),
+                ),
+                const SizedBox(height: 15),
+                GridView.count(
+                  shrinkWrap: true, // Important for nesting in Column
+                  physics: const NeverScrollableScrollPhysics(), // Disable internal scrolling
+                  crossAxisCount: 2,
+                  crossAxisSpacing: 15,
+                  mainAxisSpacing: 15,
+                  childAspectRatio: 1.5, // Wider cards to save vertical space
+                  children: [
+                    _buildDashboardCard(context, icon: Icons.library_books, label: "Courses", color: Colors.blueAccent, onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const CourseListScreen()))),
+                    _buildDashboardCard(context, icon: Icons.people, label: "Students", color: Colors.green, onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const SelectCourseScreen()))),
+                    _buildDashboardCard(context, icon: Icons.checklist, label: "Attendance", color: Colors.orange, onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const SelectCourseAttendanceScreen()))),
+                    _buildDashboardCard(context, icon: Icons.calendar_month, label: "Routine", color: Colors.purple, onTap: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const RoutineListScreen()))),
+                  ],
+                ),
+              ],
             ),
           ),
         ],
@@ -293,20 +334,24 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildEmptyState(String todayName) {
-    return Container(
-      width: double.infinity,
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(15),
-        border: Border.all(color: Colors.grey.shade200),
-      ),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(Icons.event_busy, size: 50, color: Colors.grey[400]),
-          const SizedBox(height: 10),
-          Text("No classes scheduled for $todayName", style: TextStyle(color: Colors.grey[600])),
-        ],
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16.0),
+      child: Container(
+        padding: const EdgeInsets.all(30),
+        width: double.infinity,
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(15),
+          border: Border.all(color: Colors.grey.shade200),
+        ),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.event_busy, size: 50, color: Colors.grey[400]),
+            const SizedBox(height: 10),
+            Text("No classes scheduled for $todayName", style: TextStyle(color: Colors.grey[600])),
+          ],
+        ),
       ),
     );
   }
@@ -325,19 +370,20 @@ class _HomeScreenState extends State<HomeScreen> {
               offset: const Offset(0, 5),
             ),
           ],
+          border: Border.all(color: Colors.grey.shade100),
         ),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             CircleAvatar(
-              radius: 25,
+              radius: 22,
               backgroundColor: color.withOpacity(0.1),
-              child: Icon(icon, size: 28, color: color),
+              child: Icon(icon, size: 24, color: color),
             ),
-            const SizedBox(height: 10),
+            const SizedBox(height: 8),
             Text(
               label,
-              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
             ),
           ],
         ),
