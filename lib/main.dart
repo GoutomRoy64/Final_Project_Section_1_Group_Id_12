@@ -9,7 +9,7 @@ import 'providers/course_provider.dart';
 import 'providers/student_provider.dart';
 import 'providers/attendance_provider.dart';
 import 'providers/routine_provider.dart';
-
+//All GOOD
 // Screens
 import 'screens/home_screen.dart';
 import 'screens/auth/login_screen.dart';
