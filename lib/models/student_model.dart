@@ -1,7 +1,7 @@
 class Student {
   final String id; // The database key
   final String name;
-  final String rollNumber; // The 'studentId' field in your image
+  final String rollNumber;
 
   Student({
     required this.id,

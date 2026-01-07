@@ -2,10 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:intl/intl.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_auth/firebase_auth.dart'; // <--- ADDED THIS IMPORT
 import '../../providers/student_provider.dart';
 import '../../providers/attendance_provider.dart';
 import '../../providers/routine_provider.dart';
-import '../../models/routine_model.dart';
 import 'attendance_summary_screen.dart';
 
 class TakeAttendanceScreen extends StatefulWidget {
@@ -28,17 +28,15 @@ class _TakeAttendanceScreenState extends State<TakeAttendanceScreen> {
   Map<String, Map<String, dynamic>> _summaryData = {};
   bool _isLoading = false;
 
-  // 0: Initial (Save Attendance)
-  // 1: Late Mode (Save Late Attendance)
-  // 2: Completed (Disabled)
+  // --- ATTENDANCE PHASES ---
+  // 0: Initial (Can Mark Present/Absent) -> Button: "Save Attendance"
+  // 1: Late Mode (Can Mark Late only)     -> Button: "Save Late Attendance"
+  // 2: Completed (Read Only)              -> Button: "Submitted & Locked"
   int _saveState = 0;
 
-  // Time Validation
+  // --- TIME CONSTRAINTS ---
   bool _isWithinTimeWindow = false;
-  String _timeWindowMessage = "Checking schedule...";
-
-  // Helper for Firestore path
-  String get appId => 'default-app-id';
+  String _statusMessage = "Checking schedule...";
 
   @override
   void initState() {
@@ -47,87 +45,128 @@ class _TakeAttendanceScreenState extends State<TakeAttendanceScreen> {
   }
 
   Future<void> _loadData() async {
-    // Determine if the widget is still mounted before setting state
     if (!mounted) return;
     setState(() => _isLoading = true);
 
-    final attProvider = Provider.of<AttendanceProvider>(context, listen: false);
     final stuProvider = Provider.of<StudentProvider>(context, listen: false);
     final routineProvider = Provider.of<RoutineProvider>(context, listen: false);
 
-    // 1. Fetch Data
+    // 1. Fetch Necessary Data
     await stuProvider.fetchStudents(widget.courseId);
-    await routineProvider.fetchRoutines(); // Ensure routines are loaded
-    await _fetchAttendanceForDate();
-    final summary = await attProvider.getAttendanceSummary(widget.courseId);
+    await routineProvider.fetchRoutines();
 
-    // 2. Check Time Validity
+    // 2. Fetch Existing Attendance Status from DB
+    await _fetchAttendanceStatus();
+
+    // 3. Get Summary Statistics for UI (Calculated Locally for Accuracy)
+    await _fetchSummaryStats();
+
+    // 4. Validate Time (Is class running right now?)
     _checkTimeConstraint(routineProvider);
 
     if (mounted) {
       setState(() {
-        _summaryData = summary;
         _isLoading = false;
       });
     }
   }
 
+  // --- LOGIC: CALCULATE STATS LOCALLY ---
+  // Fixes the issue where 'Late' count wasn't updating because Provider might miss it.
+  Future<void> _fetchSummaryStats() async {
+    try {
+      final snapshot = await FirebaseFirestore.instance
+          .collection('attendance')
+          .where('courseId', isEqualTo: widget.courseId)
+          .get();
+
+      Map<String, Map<String, dynamic>> summary = {};
+
+      for (var doc in snapshot.docs) {
+        final data = doc.data();
+        final statusMap = data['status'] as Map<String, dynamic>? ?? {};
+
+        statusMap.forEach((studentId, status) {
+          if (!summary.containsKey(studentId)) {
+            summary[studentId] = {'present': 0, 'late': 0, 'total': 0};
+          }
+          summary[studentId]!['total'] = (summary[studentId]!['total'] ?? 0) + 1;
+
+          if (status == 'Present') {
+            summary[studentId]!['present'] = (summary[studentId]!['present'] ?? 0) + 1;
+          } else if (status == 'Late') {
+            summary[studentId]!['late'] = (summary[studentId]!['late'] ?? 0) + 1;
+          }
+        });
+      }
+
+      if (mounted) {
+        setState(() {
+          _summaryData = summary;
+        });
+      }
+    } catch (e) {
+      print("Error calculating summary: $e");
+    }
+  }
+
+  // --- LOGIC: STRICT TIME WINDOW ---
   void _checkTimeConstraint(RoutineProvider routineProvider) {
     if (!mounted) return;
-    // Only enforce time constraint if selected date is TODAY
+
     final now = DateTime.now();
     final isToday = _selectedDate.year == now.year &&
         _selectedDate.month == now.month &&
         _selectedDate.day == now.day;
 
+    // Rule 1: Must be Today
     if (!isToday) {
       setState(() {
         _isWithinTimeWindow = false;
-        _timeWindowMessage = "Attendance can only be taken on the current day during class time.";
+        _statusMessage = "Attendance is only allowed on the current day.";
       });
       return;
     }
 
-    String dayName = DateFormat('EEEE').format(now);
+    String dayName = DateFormat('EEEE').format(now); // e.g., "Monday"
 
     try {
+      // Find routine for this course & day
       final routine = routineProvider.routines.firstWhere(
             (r) => r.courseId == widget.courseId && r.day == dayName,
       );
 
-      // Parse Routine Time Range
-      final times = _parseTimeRange(routine.time); // Returns [StartDateTime, EndDateTime]
-
+      // Parse Times
+      final times = _parseTimeRange(routine.time);
       if (times.isNotEmpty) {
         final classStart = times[0];
         final classEnd = times[1];
 
-        // Buffer: 10 mins before start, 10 mins after end
-        final allowedStart = classStart.subtract(const Duration(minutes: 10));
-        final allowedEnd = classEnd.add(const Duration(minutes: 10));
+        // Strict Window: 5 min buffer before start, 5 min buffer after end
+        final allowedStart = classStart.subtract(const Duration(minutes: 5));
+        final allowedEnd = classEnd.add(const Duration(minutes: 5));
 
         if (now.isAfter(allowedStart) && now.isBefore(allowedEnd)) {
           setState(() {
             _isWithinTimeWindow = true;
-            _timeWindowMessage = "Class is in session.";
+            _statusMessage = "Class is in session. Attendance Allowed.";
           });
         } else {
           setState(() {
             _isWithinTimeWindow = false;
-            _timeWindowMessage = "Attendance is only allowed between ${DateFormat.jm().format(allowedStart)} and ${DateFormat.jm().format(allowedEnd)}.";
+            _statusMessage = "Attendance Allowed only between ${DateFormat.jm().format(allowedStart)} - ${DateFormat.jm().format(allowedEnd)}";
           });
         }
       }
     } catch (e) {
       setState(() {
         _isWithinTimeWindow = false;
-        _timeWindowMessage = "No routine found for today ($dayName). Cannot take attendance.";
+        _statusMessage = "No class routine found for today ($dayName).";
       });
     }
   }
 
   List<DateTime> _parseTimeRange(String timeStr) {
-    // Expected formats: "9:30 AM - 10:45 AM" or "9:00 AM"
     final now = DateTime.now();
     try {
       if (timeStr.contains(" - ")) {
@@ -137,7 +176,6 @@ class _TakeAttendanceScreenState extends State<TakeAttendanceScreen> {
           _parseSingleTime(parts[1], now)
         ];
       } else {
-        // Fallback for single time: Assume 1 hour duration
         final start = _parseSingleTime(timeStr, now);
         return [start, start.add(const Duration(hours: 1))];
       }
@@ -152,177 +190,100 @@ class _TakeAttendanceScreenState extends State<TakeAttendanceScreen> {
       final time = DateFormat("h:mm a").parse(cleanStr);
       return DateTime(now.year, now.month, now.day, time.hour, time.minute);
     } catch (_) {
-      try {
-        final time = DateFormat.jm().parse(cleanStr);
-        return DateTime(now.year, now.month, now.day, time.hour, time.minute);
-      } catch (e) {
-        // Fallback if parsing fails, return current time to avoid crash
-        return now;
-      }
+      final time = DateFormat.jm().parse(cleanStr);
+      return DateTime(now.year, now.month, now.day, time.hour, time.minute);
     }
   }
 
-  Future<void> _fetchAttendanceForDate() async {
+  // --- LOGIC: FETCH & DETERMINE PHASE ---
+  Future<void> _fetchAttendanceStatus() async {
     final dateKey = DateFormat('yyyy-MM-dd').format(_selectedDate);
     final stuProvider = Provider.of<StudentProvider>(context, listen: false);
+    final docId = "${widget.courseId}_$dateKey";
 
-    // Call provider to keep it in sync, but don't rely on it for critical state logic
     try {
-      await Provider.of<AttendanceProvider>(context, listen: false)
-          .fetchAttendance(widget.courseId, dateKey);
-    } catch (_) {}
-
-    // Direct Firestore Fetch for robust state
-    // This ensures we don't accidentally restart Phase 1 if the provider is empty
-    QuerySnapshot<Map<String, dynamic>>? snap;
-    try {
-      snap = await FirebaseFirestore.instance
-          .collection('artifacts')
-          .doc(appId)
-          .collection('public')
-          .doc('data')
+      // FIX: Use the 'attendance' root collection directly to match your Project Structure
+      final docSnap = await FirebaseFirestore.instance
           .collection('attendance')
-          .where('courseId', isEqualTo: widget.courseId)
-          .where('date', isEqualTo: dateKey)
-          .limit(1)
+          .doc(docId)
           .get();
-    } catch (e) {
-      debugPrint("Error fetching attendance direct: $e");
-    }
 
-    Map<String, String> newStatus = {};
-    int fetchedPhase = 0;
+      Map<String, String> newStatus = {};
+      int fetchedPhase = 0;
 
-    if (snap != null && snap.docs.isNotEmpty) {
-      final data = snap.docs.first.data();
+      if (docSnap.exists) {
+        final data = docSnap.data() as Map<String, dynamic>;
+        fetchedPhase = data['phase'] ?? 1; // If record exists but no phase, assume 1
 
-      // If 'phase' field is missing but record exists, it implies Phase 1 was done (Legacy).
-      fetchedPhase = data['phase'] ?? 1;
+        final recordsMap = data['status'] as Map<String, dynamic>? ?? {};
 
-      // Get Records to populate status
-      final recordsMap = data['records'] as Map<String, dynamic>? ?? {};
-
-      for (var student in stuProvider.students) {
-        if (recordsMap.containsKey(student.id)) {
-          newStatus[student.id] = recordsMap[student.id].toString();
-        } else {
-          // New student or missing record? Default to Present
+        for (var student in stuProvider.students) {
+          newStatus[student.id] = recordsMap[student.id]?.toString() ?? "Present";
+        }
+      } else {
+        // No record = Phase 0
+        fetchedPhase = 0;
+        for (var student in stuProvider.students) {
           newStatus[student.id] = "Present";
         }
       }
-    } else {
-      // No record found in DB -> Phase 0
-      fetchedPhase = 0;
-      for (var student in stuProvider.students) {
-        newStatus[student.id] = "Present"; // Default new attendance
+
+      if (mounted) {
+        setState(() {
+          _attendanceStatus = newStatus;
+          _saveState = fetchedPhase > 2 ? 2 : fetchedPhase;
+        });
       }
-    }
-
-    if (mounted) {
-      setState(() {
-        _attendanceStatus = newStatus;
-
-        // Update State based on Phase
-        if (fetchedPhase >= 2) {
-          _saveState = 2; // Finalized
-        } else if (fetchedPhase == 1) {
-          _saveState = 1; // Late Attendance Mode
-        } else {
-          _saveState = 0; // Initial Mode
-        }
-      });
+    } catch (e) {
+      print("Error fetching attendance: $e");
     }
   }
 
+  // --- LOGIC: SAVE (2-STEP PROCESS) ---
   Future<void> _saveAttendance() async {
     if (!_isWithinTimeWindow) return;
+    if (_saveState >= 2) return; // Locked
 
     setState(() => _isLoading = true);
     final dateKey = DateFormat('yyyy-MM-dd').format(_selectedDate);
 
     try {
-      // --- CRITICAL PRE-CHECK: Prevent overwriting/duplicates ---
-      final checkSnap = await FirebaseFirestore.instance
-          .collection('artifacts')
-          .doc(appId)
-          .collection('public')
-          .doc('data')
-          .collection('attendance')
-          .where('courseId', isEqualTo: widget.courseId)
-          .where('date', isEqualTo: dateKey)
-          .limit(1)
-          .get();
-
-      if (checkSnap.docs.isNotEmpty) {
-        final existingData = checkSnap.docs.first.data();
-        final dbPhase = existingData['phase'] ?? 1;
-
-        // If local state is "behind" the DB state (e.g. User thinks Phase 0, but DB is Phase 1)
-        if (_saveState < dbPhase) {
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                    content: Text("Attendance already updated! Syncing with server..."),
-                    backgroundColor: Colors.orange
-                )
-            );
-            // Reload to sync UI with DB
-            await _fetchAttendanceForDate();
-            setState(() => _isLoading = false);
-          }
-          return; // STOP SAVE
-        }
-      }
-
-      // --- PROCEED IF SAFE ---
-
-      // 1. Save Attendance Data via Provider
-      await Provider.of<AttendanceProvider>(context, listen: false)
-          .markAttendance(widget.courseId, dateKey, _attendanceStatus);
-
-      // 2. Persist the Phase state to Firestore manually
+      // 1. Calculate New Phase (0 -> 1, or 1 -> 2)
       int newPhase = _saveState + 1;
-      if (newPhase > 2) newPhase = 2;
 
-      try {
-        final q = FirebaseFirestore.instance
-            .collection('artifacts')
-            .doc(appId)
-            .collection('public')
-            .doc('data')
-            .collection('attendance')
-            .where('courseId', isEqualTo: widget.courseId)
-            .where('date', isEqualTo: dateKey)
-            .limit(1);
+      // 2. Prepare Data
+      final docId = "${widget.courseId}_$dateKey";
 
-        final snap = await q.get();
-        if (snap.docs.isNotEmpty) {
-          await snap.docs.first.reference.update({'phase': newPhase});
-        }
-      } catch (e) {
-        debugPrint("Error persisting phase: $e");
-      }
+      // FIX: Use the correct 'attendance' collection
+      final docRef = FirebaseFirestore.instance
+          .collection('attendance')
+          .doc(docId);
 
-      // 3. Update Local State immediately
-      if (_saveState < 2) {
-        setState(() {
-          _saveState++;
-        });
-      }
+      await docRef.set({
+        'courseId': widget.courseId,
+        'date': dateKey,
+        'status': _attendanceStatus,
+        'phase': newPhase, // Explicitly save phase
+        'userId': Provider.of<AttendanceProvider>(context, listen: false).userIdForSave
+      }, SetOptions(merge: true));
 
-      // Reload summary
-      final summary = await Provider.of<AttendanceProvider>(context, listen: false).getAttendanceSummary(widget.courseId);
+      // 3. Update UI
+      setState(() {
+        _saveState = newPhase;
+      });
+
+      // Update Summary (Recalculate locally to ensure 'Late' is counted)
+      await _fetchSummaryStats();
 
       if (mounted) {
         setState(() {
-          _summaryData = summary;
           _isLoading = false;
         });
 
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Attendance Saved Successfully!"), backgroundColor: Colors.green),
-        );
+        String msg = newPhase == 1 ? "Attendance Saved!" : "Late Attendance Saved! Record Locked.";
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg), backgroundColor: Colors.green));
       }
+
     } catch (error) {
       if (mounted) {
         setState(() => _isLoading = false);
@@ -331,27 +292,28 @@ class _TakeAttendanceScreenState extends State<TakeAttendanceScreen> {
     }
   }
 
+  // --- LOGIC: TOGGLE STATUS ---
   void _toggleStatus(String studentId) {
+    if (_saveState >= 2 || !_isWithinTimeWindow) return; // Locked or Wrong Time
+
     setState(() {
       String current = _attendanceStatus[studentId] ?? "Present";
 
       if (_saveState == 0) {
-        // --- PHASE 1: ATTENDANCE ---
-        // Toggle: Present <-> Absent
+        // Phase 1 Logic: Present <-> Absent
         if (current == "Present") {
           _attendanceStatus[studentId] = "Absent";
         } else {
           _attendanceStatus[studentId] = "Present";
         }
       } else if (_saveState == 1) {
-        // --- PHASE 2: LATE ATTENDANCE ---
-        // Logic: "Only for those students who miss the first attendance"
+        // Phase 2 Logic: Absent <-> Late (Present is locked)
         if (current == "Absent") {
           _attendanceStatus[studentId] = "Late";
         } else if (current == "Late") {
-          _attendanceStatus[studentId] = "Absent"; // Undo Late
+          _attendanceStatus[studentId] = "Absent";
         }
-        // Present is Locked
+        // "Present" students cannot be changed in Phase 2
       }
     });
   }
@@ -361,13 +323,19 @@ class _TakeAttendanceScreenState extends State<TakeAttendanceScreen> {
     final students = Provider.of<StudentProvider>(context).students;
     final formattedDate = DateFormat('EEE, MMM d, yyyy').format(_selectedDate);
 
-    // Determine Button Text
+    // Button Text Logic
     String buttonText = "SAVE ATTENDANCE";
-    if (_saveState == 1) buttonText = "SAVE LATE ATTENDANCE";
-    if (_saveState >= 2) buttonText = "ATTENDANCE SUBMITTED";
+    Color buttonColor = Colors.indigo;
 
-    // Button Disabled Conditions
-    bool isButtonDisabled = _isLoading || _saveState >= 2 || !_isWithinTimeWindow;
+    if (_saveState == 1) {
+      buttonText = "SAVE LATE ATTENDANCE";
+      buttonColor = Colors.orange;
+    } else if (_saveState >= 2) {
+      buttonText = "LOCKED";
+      buttonColor = Colors.grey;
+    }
+
+    bool isDisabled = _isLoading || _saveState >= 2 || !_isWithinTimeWindow;
 
     return Scaffold(
       appBar: AppBar(
@@ -377,19 +345,13 @@ class _TakeAttendanceScreenState extends State<TakeAttendanceScreen> {
         actions: [
           IconButton(
             icon: const Icon(Icons.bar_chart),
-            tooltip: 'View Summary',
-            onPressed: () => Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (_) => AttendanceSummaryScreen(courseId: widget.courseId, courseName: widget.courseName),
-              ),
-            ),
+            onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => AttendanceSummaryScreen(courseId: widget.courseId, courseName: widget.courseName))),
           )
         ],
       ),
       body: Column(
         children: [
-          // Info Header
+          // STATUS BANNER
           Container(
             padding: const EdgeInsets.all(16),
             width: double.infinity,
@@ -397,14 +359,29 @@ class _TakeAttendanceScreenState extends State<TakeAttendanceScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text("Date: $formattedDate", style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text("Date: $formattedDate", style: const TextStyle(fontWeight: FontWeight.bold)),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                      decoration: BoxDecoration(
+                          color: _saveState == 0 ? Colors.blue.shade100 : (_saveState == 1 ? Colors.orange.shade100 : Colors.grey.shade300),
+                          borderRadius: BorderRadius.circular(4)
+                      ),
+                      child: Text(
+                        _saveState == 0 ? "Step 1: Roll Call" : (_saveState == 1 ? "Step 2: Late Marking" : "Finalized"),
+                        style: const TextStyle(fontSize: 10, fontWeight: FontWeight.bold),
+                      ),
+                    )
+                  ],
+                ),
                 const SizedBox(height: 5),
                 Text(
-                    _timeWindowMessage,
+                    _statusMessage,
                     style: TextStyle(
                         color: _isWithinTimeWindow ? Colors.green[800] : Colors.red[800],
-                        fontSize: 13,
-                        fontWeight: FontWeight.w500
+                        fontWeight: FontWeight.w600
                     )
                 ),
               ],
@@ -414,85 +391,53 @@ class _TakeAttendanceScreenState extends State<TakeAttendanceScreen> {
           Expanded(
             child: _isLoading
                 ? const Center(child: CircularProgressIndicator())
-                : students.isEmpty
-                ? const Center(child: Text("No students enrolled."))
                 : ListView.builder(
               itemCount: students.length,
               itemBuilder: (context, index) {
                 final student = students[index];
                 final status = _attendanceStatus[student.id] ?? "Present";
 
-                // Determine Icons & Colors
-                IconData icon = Icons.circle_outlined;
-                Color color = Colors.grey;
-                bool isLocked = false;
+                // Visual Styles
+                IconData icon = Icons.check_circle;
+                Color color = Colors.green;
+                bool isItemLocked = false;
 
                 if (status == "Present") {
                   icon = Icons.check_circle;
                   color = Colors.green;
-                  // Lock 'Present' students during Late Phase
-                  if (_saveState == 1) isLocked = true;
+                  // Present students are locked in Step 2 (Late Marking)
+                  if (_saveState == 1) isItemLocked = true;
                 } else if (status == "Late") {
-                  icon = Icons.access_time_filled; // Late Icon
+                  icon = Icons.access_time_filled;
                   color = Colors.orange;
                 } else {
-                  // Absent
                   icon = Icons.cancel;
                   color = Colors.red;
                 }
 
-                // Override color if the whole screen is disabled or locked
-                if (isButtonDisabled || isLocked) {
-                  color = color.withOpacity(0.5);
-                }
+                if (isDisabled || isItemLocked) color = color.withOpacity(0.3);
 
-                // Calculate Absents from Summary
-                int total = 0;
-                int present = 0;
-                int late = 0;
-                if (_summaryData.containsKey(student.id)) {
-                  total = _summaryData[student.id]?['total'] ?? 0;
-                  present = _summaryData[student.id]?['present'] ?? 0;
-                  late = _summaryData[student.id]?['late'] ?? 0;
-                }
+                // Stats
+                int total = _summaryData[student.id]?['total'] ?? 0;
+                int present = _summaryData[student.id]?['present'] ?? 0;
+                int late = _summaryData[student.id]?['late'] ?? 0;
                 int absents = total - (present + late);
 
                 return Card(
                   margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                   child: ListTile(
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 4.0),
-                    title: Row(
-                      children: [
-                        Expanded(child: Text(student.name, style: const TextStyle(fontWeight: FontWeight.bold))),
-                        if (absents > 0)
-                          Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                            decoration: BoxDecoration(
-                                color: Colors.red.shade50,
-                                borderRadius: BorderRadius.circular(4),
-                                border: Border.all(color: Colors.red.shade200)
-                            ),
-                            child: Text("Abs: $absents", style: TextStyle(fontSize: 11, color: Colors.red[800], fontWeight: FontWeight.bold)),
-                          )
-                      ],
-                    ),
-                    subtitle: Text(student.rollNumber),
+                    title: Text(student.name, style: const TextStyle(fontWeight: FontWeight.bold)),
+                    subtitle: Text("${student.rollNumber} • Absents: $absents • Late: $late"),
                     trailing: InkWell(
-                      onTap: (isButtonDisabled || isLocked) ? null : () => _toggleStatus(student.id),
-                      borderRadius: BorderRadius.circular(30),
+                      onTap: (isDisabled || isItemLocked) ? null : () => _toggleStatus(student.id),
                       child: Padding(
-                        // Reduced padding to fix RenderFlex overflow in ListTile
-                        padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 2.0),
+                        // FIX: Reduced padding to prevent Overflow error
+                        padding: const EdgeInsets.symmetric(horizontal: 4.0, vertical: 2.0),
                         child: Column(
                           mainAxisSize: MainAxisSize.min,
-                          mainAxisAlignment: MainAxisAlignment.center,
                           children: [
-                            Icon(icon, color: color, size: 26),
-                            const SizedBox(height: 2),
-                            Text(
-                              status,
-                              style: TextStyle(fontSize: 10, color: color, fontWeight: FontWeight.bold),
-                            )
+                            Icon(icon, color: color, size: 28),
+                            Text(status, style: TextStyle(fontSize: 10, color: color, fontWeight: FontWeight.bold))
                           ],
                         ),
                       ),
@@ -503,28 +448,21 @@ class _TakeAttendanceScreenState extends State<TakeAttendanceScreen> {
             ),
           ),
 
-          // Save Button
+          // SUBMIT BUTTON
           SafeArea(
             child: Padding(
               padding: const EdgeInsets.all(16.0),
               child: SizedBox(
                 width: double.infinity,
-                height: 50,
+                height: 55,
                 child: ElevatedButton(
-                  onPressed: isButtonDisabled ? null : _saveAttendance,
+                  onPressed: isDisabled ? null : _saveAttendance,
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: _saveState == 1 ? Colors.orange : Colors.indigo, // Orange for Late mode
+                    backgroundColor: buttonColor,
                     foregroundColor: Colors.white,
-                    disabledBackgroundColor: Colors.grey[300],
-                    disabledForegroundColor: Colors.grey[600],
+                    disabledBackgroundColor: Colors.grey.shade300,
                   ),
-                  child: _isLoading
-                      ? const SizedBox(
-                      height: 24,
-                      width: 24,
-                      child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2)
-                  )
-                      : Text(buttonText, style: const TextStyle(fontSize: 18)),
+                  child: Text(buttonText, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
                 ),
               ),
             ),
@@ -533,4 +471,10 @@ class _TakeAttendanceScreenState extends State<TakeAttendanceScreen> {
       ),
     );
   }
+}
+
+// Extension to safely get userId in provider logic without context if needed,
+// though strictly we used context above.
+extension ProviderHelpers on AttendanceProvider {
+  String? get userIdForSave => FirebaseAuth.instance.currentUser?.uid;
 }

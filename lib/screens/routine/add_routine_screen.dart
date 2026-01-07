@@ -20,7 +20,6 @@ class _AddRoutineScreenState extends State<AddRoutineScreen> {
   String? _selectedCourseId;
   String _selectedDay = 'Monday';
 
-  // We now have Start and End times
   TimeOfDay _startTime = const TimeOfDay(hour: 9, minute: 0);
   TimeOfDay _endTime = const TimeOfDay(hour: 10, minute: 0);
 
@@ -33,17 +32,15 @@ class _AddRoutineScreenState extends State<AddRoutineScreen> {
   @override
   void initState() {
     super.initState();
-    // Fetch courses so we can populate the dropdown
+    // Fetch courses AND routines (so we can check for duplicates)
     Future.delayed(Duration.zero, () {
       Provider.of<CourseProvider>(context, listen: false).fetchCourses();
+      Provider.of<RoutineProvider>(context, listen: false).fetchRoutines();
     });
 
     if (widget.routineToEdit != null) {
       _selectedCourseId = widget.routineToEdit!.courseId;
       _selectedDay = widget.routineToEdit!.day;
-
-      // Parse existing time string (e.g., "9:00 AM - 10:00 AM")
-      // If it's old format "9:00 AM", we handle that gracefully
       _parseTimeRange(widget.routineToEdit!.time);
     }
   }
@@ -56,14 +53,12 @@ class _AddRoutineScreenState extends State<AddRoutineScreen> {
         _endTime = _stringToTimeOfDay(parts[1]);
       }
     } else {
-      // Old format fallback
       _startTime = _stringToTimeOfDay(timeString);
-      _endTime = _startTime.replacing(hour: _startTime.hour + 1); // Default 1 hour duration
+      _endTime = _startTime.replacing(hour: _startTime.hour + 1);
     }
   }
 
   TimeOfDay _stringToTimeOfDay(String s) {
-    // Simple parser for "h:mm a"
     try {
       final format = RegExp(r"(\d+):(\d+)\s?(AM|PM)", caseSensitive: false);
       final match = format.firstMatch(s);
@@ -92,7 +87,6 @@ class _AddRoutineScreenState extends State<AddRoutineScreen> {
       setState(() {
         if (isStartTime) {
           _startTime = picked;
-          // Auto-adjust end time if it's before start time
           if (_toDouble(_endTime) <= _toDouble(_startTime)) {
             _endTime = _startTime.replacing(hour: _startTime.hour + 1);
           }
@@ -114,12 +108,38 @@ class _AddRoutineScreenState extends State<AddRoutineScreen> {
 
     setState(() => _isLoading = true);
 
-    // Format time range string: "10:30 AM - 11:45 AM"
+    final provider = Provider.of<RoutineProvider>(context, listen: false);
+
+    // --- DUPLICATE CHECK LOGIC ---
+    // Check if this course is already scheduled for the selected day
+    bool isDuplicate = provider.routines.any((routine) {
+      bool sameCourse = routine.courseId == _selectedCourseId;
+      bool sameDay = routine.day == _selectedDay;
+
+      // If we are editing, we shouldn't count the current routine as a duplicate of itself
+      bool isNotSelf = widget.routineToEdit == null || routine.id != widget.routineToEdit!.id;
+
+      return sameCourse && sameDay && isNotSelf;
+    });
+
+    if (isDuplicate) {
+      setState(() => _isLoading = false);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error: This course is already scheduled on $_selectedDay.'),
+            backgroundColor: Colors.red,
+            duration: const Duration(seconds: 3),
+          ),
+        );
+      }
+      return; // Stop saving
+    }
+    // -----------------------------
+
     final timeString = "${_startTime.format(context)} - ${_endTime.format(context)}";
 
     try {
-      final provider = Provider.of<RoutineProvider>(context, listen: false);
-
       if (widget.routineToEdit == null) {
         await provider.addRoutine(_selectedCourseId!, _selectedDay, timeString);
       } else {
@@ -153,7 +173,6 @@ class _AddRoutineScreenState extends State<AddRoutineScreen> {
               return Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  // 1. Course Dropdown
                   DropdownButtonFormField<String>(
                     value: _selectedCourseId,
                     decoration: const InputDecoration(
@@ -173,7 +192,6 @@ class _AddRoutineScreenState extends State<AddRoutineScreen> {
 
                   const SizedBox(height: 15),
 
-                  // 2. Day Dropdown
                   DropdownButtonFormField<String>(
                     value: _selectedDay,
                     decoration: const InputDecoration(
@@ -192,7 +210,6 @@ class _AddRoutineScreenState extends State<AddRoutineScreen> {
 
                   const SizedBox(height: 15),
 
-                  // 3. Time Picker Row (Start & End)
                   const Text("Class Duration", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
                   const SizedBox(height: 10),
                   Row(
@@ -231,7 +248,6 @@ class _AddRoutineScreenState extends State<AddRoutineScreen> {
 
                   const SizedBox(height: 30),
 
-                  // 4. Save Button
                   SizedBox(
                     width: double.infinity,
                     height: 50,
